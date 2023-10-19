@@ -1,0 +1,36 @@
+#!/bin/sh
+set -e
+. /usr/share/debconf/confmodule
+. /tmp/HandsOff-fn.sh
+echo 'debug: Running...'
+db_register hands-off/meta/text hands-off/title
+db_register hands-off/meta/text hands-off/item
+db_subst hands-off/title DESC "System"
+db_progress START 0 1 hands-off/title
+db_subst hands-off/item DESC "Downloading root config"
+db_progress INFO hands-off/item
+
+# Load variables
+. /tmp/domain_info
+. /tmp/host_info
+
+# shellcheck disable=SC2086
+db_set passwd/root-password-crypted ${ROOT_PASSWORD_HASH}
+# shellcheck disable=SC2086
+db_set time/zone ${TIMEZONE}
+
+if [[ -n "${USER_NAME}" ]]; then
+    db_set passwd/make-user true
+    # shellcheck disable=SC2086
+    db_set passwd/user-fullname ${USER_FULLNAME}
+    # shellcheck disable=SC2086
+    db_set passwd/username ${USER_NAME}
+    # shellcheck disable=SC2086
+    db_set passwd/user-password-crypted ${USER_PASSWORD_HASH}
+fi
+
+db_progress STOP
+db_unregister hands-off/item
+db_unregister hands-off/title
+echo 'debug: exiting successfully'
+exit 0

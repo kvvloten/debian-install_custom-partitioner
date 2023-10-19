@@ -1,0 +1,15 @@
+Source: custom-partitioner
+Section: debian-installer
+Priority: standard
+Maintainer: Kees van Vloten <keesvanvloten@gmail.com>
+Build-Depends: debhelper (>= 11)
+Standards-Version: 4.1.3
+Homepage: <insert the upstream URL, if relevant>
+
+Package: custom-partitioner
+Package-Type: udeb
+XB-Installer-Menu-Item: 4100
+Architecture: all
+Depends: ${misc:Depends}, di-utils, partman-partitioning, partman-target
+Description: Custom partitioning via preseeding
+ This module runs helper scripts to generate a custom expert_recipe for partman

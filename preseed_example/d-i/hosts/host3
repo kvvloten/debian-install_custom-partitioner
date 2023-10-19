@@ -1,0 +1,2 @@
+PARTITION_LAYOUT=1hd-crypt-lvm
+PART_1HD_LUKS_CRYPT_PASSWORD='KeepThisSecret'

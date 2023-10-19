@@ -1,0 +1,52 @@
+Template: custom-partitioner/title
+Type: text
+#  Main menu item
+_Description: Perform Automatic Custom Partitioning
+
+
+Template: custom-partitioner/please_wait
+Type: text
+# :sl2:
+_Description: Please wait...
+
+Template: custom-partitioner/progress_clear
+Type: text
+# :sl2:
+_Description: Clearing partition table
+
+Template: custom-partitioner/progress_partition
+Type: text
+# :sl2:
+_Description: Writing partition table
+
+Template: custom-partitioner/progress_raid
+Type: text
+# :sl2:
+_Description: Setting up RAID devices
+
+Template: custom-partitioner/progress_encrypt
+Type: text
+# :sl2:
+_Description: Setting up Encrypted Volume
+
+Template: custom-partitioner/progress_vg
+Type: text
+# :sl2:
+_Description: Setting up LVM VolumeGroup
+
+Template: custom-partitioner/progress_lv
+Type: text
+# :sl2:
+_Description: Setting up LVM LogicalVolumes
+
+Template: custom-partitioner/progress_format
+Type: text
+# :sl2:
+_Description: Formatting volumes
+
+
+Template: custom-partitioner/progress_finish
+Type: text
+# :sl2:
+_Description: Writing configuration
+

@@ -1,0 +1,23 @@
+
+TIMEZONE='Europe/Amsterdam'
+
+# Create password hash: echo "<plain_pw>" | mkpasswd --method=SHA-512 --stdin
+ROOT_PASSWORD_HASH='<initial root password hash'
+# Optionally allow ssh-key login as root user
+#ROOT_AUTHORIZED_KEYS=''  # this is a comma separated list
+
+
+# Optionally create an initial unprivileged user, add these vars:
+#USER_NAME=''
+#USER_FULLNAME=''
+#USER_HOME_DIR=''
+#USER_PASSWORD_HASH=''
+# Optionally allow ssh-key login with this user
+#USER_AUTHORIZED_KEYS=''  # this is a comma separated list
+
+
+# Optionally trigger a follow-up deployment
+#   curl will be run to call the specified url
+#   as an example the debian package 'webhook' could be used to trigger an ansible playbook run for this host 
+#WEBHOOK_URL='https://host.example.com/webhook/trigger-followup-deploy'
+#TRIGGER_WEBHOOK=true

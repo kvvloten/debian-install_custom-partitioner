@@ -1,0 +1,82 @@
+#!/bin/sh
+set -e
+. /usr/share/debconf/confmodule
+. /tmp/HandsOff-fn.sh
+echo 'debug: Running...'
+
+db_register hands-off/meta/text hands-off/title
+db_register hands-off/meta/text hands-off/item
+db_subst hands-off/title DESC "System"
+db_progress START 0 3 hands-off/title
+
+db_subst hands-off/item DESC "Installing openssh"
+db_progress INFO hands-off/item
+in-target apt-get -y install debconf-utils openssh-server
+
+db_progress STEP 1
+db_subst hands-off/item DESC "Configuring openssh"
+db_progress INFO hands-off/item
+
+db_progress STEP 1
+db_subst hands-off/item DESC "Downloading openssh configuration info"
+db_progress INFO hands-off/item
+
+# Load variables
+. /tmp/domain_info
+. /tmp/host_info
+
+# shellcheck disable=SC2154
+INFO_URL="$(dirname "$(dirname "${url}")")"
+
+wget -O  /tmp/domain_info "${INFO_URL}/domain_info"
+. /tmp/domain_info
+# Requires: WEBHOOK_URL, USER_*, ROOT_*
+
+set -x
+HOME_DIR=""
+for USER in root ${USER_NAME}; do
+    if [[ "${USER}" == "root" ]]; then
+        KEY_NAME="root"
+        UID=0
+        HOME_DIR="/${USER}"
+    else
+        KEY_NAME="user"
+        UID="$(grep "^${USER}" /target/etc/passwd | cut -d ':' -f 3)"
+
+        if [[ -z "${USER_HOME_DIR}" ]]; then
+            HOME_DIR="/home/${USER}"
+        else
+            HOME_DIR="${USER_HOME_DIR}"
+            REGEX_HOME_DIR="$(echo "${HOME_DIR}" | sed -e 's/\//\\\//g')"
+            sed -i "/^${USER}/ s/\/home\/${USER}/${REGEX_HOME_DIR}/" /target/etc/passwd
+            [[ -d "/target${HOME_DIR}" ]] || mkdir "/target${HOME_DIR}"
+            chmod 0750 "/target${HOME_DIR}"
+            chown "${UID}.${UID}" "/target${HOME_DIR}"
+        fi
+    fi
+    SSH_DIR="/target${HOME_DIR}/.ssh"
+    [[ -d "${SSH_DIR}" ]] || mkdir "${SSH_DIR}"
+    chmod 0750 "${SSH_DIR}"
+    chown "${UID}.${UID}" "${SSH_DIR}"
+    # shellcheck disable=SC2060
+    KEY="$(echo "${KEY_NAME}_authorized_keys" | tr [a-z] [A-Z])"
+    echo "key [${KEY}]"
+    if grep -q "^${KEY}=" /tmp/domain_info; then
+        db_subst hands-off/item DESC "Adding authorized_keys to ${USER}"
+        VALUE="$(grep "^${KEY}=" /tmp/domain_info | cut -d '=' -f 2- | tr -d "'")"
+        echo "value [${VALUE}]"
+        if [[ -n "${VALUE}" ]]; then
+            echo "${VALUE}" | tr ',' '\n' >> "${SSH_DIR}/authorized_keys"
+            chmod 600 "${SSH_DIR}/authorized_keys"
+            chown "${UID}.${UID}" "${SSH_DIR}/authorized_keys"
+        fi
+    fi
+done
+
+[[ "${TRIGGER_WEBHOOK}" == "true" ]] && wget --no-check-certificate "${WEBHOOK_URL}" || true
+
+db_progress STOP
+db_unregister hands-off/item
+db_unregister hands-off/title
+echo 'debug: exiting successfully'
+exit 0

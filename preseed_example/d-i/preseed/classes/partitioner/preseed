@@ -1,0 +1,14 @@
+# Password for grub
+# plain
+#d-i grub-installer/password password abc
+#d-i grub-installer/password-again password abc
+# or encrypted
+#d-i grub-installer/password-crypted password [MD5 hash]
+
+### Boot loader installation
+# Grub is the default boot loader (for x86).
+# To also skip installing lilo, and install no bootloader, uncomment this
+# too:
+d-i grub-installer/only_debian boolean true
+d-i grub-installer/bootdev string default
+d-i grub-installer/force-efi-extra-removable boolean false

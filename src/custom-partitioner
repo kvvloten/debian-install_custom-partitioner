@@ -1,0 +1,809 @@
+#!/bin/sh
+set -e
+NAME="custom-partitioner"
+
+cat > /tmp/custom-partitioner.templates << EOF
+Template: custom-partitioner/meta/text
+Type: text
+Description: ${DESC}
+ ${DESCRIPTION}
+EOF
+debconf-loadtemplate custom-partitioner /tmp/custom-partitioner.templates
+
+# code: https://salsa.debian.org/installer-team/partman-base/-/blob/master/lib/base.sh
+# this code was sourced from "/lib/partman/lib/base.sh" but in bullseye sourcing this results in
+# "execv: not such file" followed by a shell exit, therefore the code is pasted here
+human2longint () {
+    local human orighuman gotb suffix int frac longint
+    set -- $*; human="$1$2$3$4$5" # without the spaces
+    orighuman="$human"
+    human=${human%b} #remove last b
+    human=${human%B} #remove last B
+    gotb=''
+    if [ "$human" != "$orighuman" ]; then
+        gotb=1
+    fi
+    suffix=${human#${human%?}} # the last symbol of $human
+    case $suffix in
+    k|K|m|M|g|G|t|T)
+        human=${human%$suffix}
+        ;;
+    *)
+        if [ "$gotb" ]; then
+            suffix=B
+        else
+            suffix=''
+        fi
+        ;;
+    esac
+    int="${human%[.,]*}"
+    [ "$int" ] || int=0
+    frac=${human#$int}
+    frac="${frac#[.,]}0000" # to be sure there are at least 4 digits
+    frac=${frac%${frac#????}} # only the first 4 digits of $frac
+    longint=$(expr "$int" \* 10000 + "$frac")
+    case $suffix in
+    b|B)
+        longint=${longint%????}
+        [ "$longint" ] || longint=0
+        ;;
+    k|K)
+        longint=${longint%?}
+        ;;
+    m|M)
+        longint=${longint}00
+        ;;
+    g|G)
+        longint=${longint}00000
+        ;;
+    t|T)
+        longint=${longint}00000000
+        ;;
+    *) # no suffix:
+        # bytes
+        #longint=${longint%????}
+        #[ "$longint" ] || longint=0
+        # megabytes
+        longint=${longint}00
+        ;;
+    esac
+    echo $longint
+}
+
+error() {
+   echo "${NAME} ERROR: $*" 1>&2
+}
+
+run_parted() {
+    local dev="$1"
+    shift
+    local command="$*"
+    local func="run_parted"
+    logger "${NAME} ${func}: parted -a opt -s ${dev} ${command}"
+    # shellcheck disable=SC2086
+    parted -a opt -s "${dev}" ${command}
+}
+
+get_disks() {
+    local disk_devs=""
+    # On mmcblk devices there can be (extra) devices like /dev/mmcblk-boot0 that show up as a disk device
+    disk_devs="$(parted_devices | cut -f 1 | grep -v 'boot[0-9]')"    
+    local func="get_disks"
+    logger "${NAME} ${func}: disk device: ${disk_devs}"
+    echo "${disk_devs}"
+}
+
+get_num_parts() {
+    local dev="$1"
+    # In bullseye parted shows all disks even if one is requested, 
+    #   i.e. the count is wrong when the machine has more than one disk
+    sfdisk -l "${dev}" 2> /dev/null | grep -c "^${dev}"
+}
+
+get_free_space() {
+    local dev="$1"
+    run_parted "${dev}" print free | tail -2 | head -1 | sed 's/  */ /g'
+}
+
+get_part_prefix() {
+    local dev="$1"
+    if echo -n "${dev}" | tail -c 1 | grep -q "[0-9]"; then
+        echo "p";
+    fi
+}
+
+is_physical_disk() {
+    local part="$1"
+    physical_disk="^/dev/(sd[a-z]|nvme[0-9]*p|mmcblk[0-9]*p)[0-9]$"
+    echo "${part}" | grep -qE "${physical_disk}"
+}
+
+get_disk_from_diskpart() {
+    local dev="$1"
+    disk="$(echo "${dev}" | sed -r 's/^(.+sd[a-z])[0-9]+$/\1/')"
+    echo "${dev}" | grep -q "^/dev/nvme" && disk="$(echo "${dev}" | sed -r 's/^(.+nvme[0-9]+)p[0-9]+$/\1/')"
+    echo "${dev}" | grep -q "^/dev/mmcblk" && disk="$(echo "${dev}" | sed -r 's/^(.+mmcblk[0-9]+)p[0-9]+$/\1/')"
+    echo "${disk}"
+}
+
+get_part_from_diskpart() {
+    local dev="$1"
+    part_id=$(echo "${dev}" | sed -r 's/.*[^0-9]+([0-9]+)$/\1/')
+    echo "${part_id}"
+}
+
+resolve_part_in_input() {
+    local text="$1"
+    local part_num
+    local disk
+    local postfix
+    if echo "${text}" | grep -q "{part#[0-9]}"; then
+        part_num="$(echo "${text}" | sed -r "s/^.*\{part#([0-9])\}.*$/\1/")"
+        disk="$(echo "${text}" | sed -r "s/^(.*)\{part#[0-9]\}.*$/\1/")"
+        postfix="$(echo "${text}" | sed -r "s/^.*\{part#[0-9]\}(.*)$/\1/")"
+        [[ -d "/sys/firmware/efi" ]] && part_num=$((part_num + 1))
+        text="${disk}$(get_part_prefix ${disk})${part_num}${postfix}"
+    fi
+    local func="resolve_part_in_input"
+    logger "${NAME} ${func}: return text: ${text}"
+    echo "$text"
+}
+
+get_dev_name() {
+    local dev="$1"
+    local alt_dev
+    local raid_num
+    dev="$(echo "${dev}" | sed 's/\/dev\///')"
+    if echo "${dev}" | grep -qE '^md[0-9]+'; then
+        # renumber raid device since (there is no guarantee that system started with zero as the first device
+        raid_num=$(echo "${dev}" | sed 's/md//')
+        raid_num=$((raid_num + 1))
+        dev="md$(sed -n ${raid_num}p /tmp/mdadm)"
+    fi    
+    
+    echo "${dev}" | grep -q "^/dev/" || dev="/dev/${dev}"
+    dev="$(resolve_part_in_input "${dev}")"
+
+    # crypt devices are in /dev/mapper
+    alt_dev="$(echo "${dev}" | sed 's/\/dev\//\/dev\/mapper\//')"
+    if [[ ! -e "${dev}" ]] && [[ -e "${alt_dev}" ]]; then
+        dev="${alt_dev}"
+    fi
+    local func="get_dev_name"
+    logger "${NAME} ${func}: return dev: ${dev}"
+    echo "${dev}"
+}
+
+get_blkid() {
+    local dev="$1"
+    blkid_dev="$(blkid -o export -- "${dev}" | grep "^UUID=" | tr -d '"')"
+    [[ -z "${blkid_dev}" ]] && error "${func}: ${dev} does not have a UUID, it is probably not formatted" && return 1
+    local func="get_blkid"
+    logger "${NAME} ${func}: return dev: ${blkid_dev}"
+    echo "${blkid_dev}"
+}
+
+change_part_label()
+{
+    local func="change_part_label"
+    logger "${NAME} ${func}: started"
+    local dev="$1"
+    local label="$2"
+    local part_id
+    local disk
+    local valid_labels
+    valid_labels="swap raid lvm"
+
+    ! echo "${valid_labels}" | grep -wq "${label}" && error "${func}: Label ${label} must be one of ${valid_labels}" && return 1
+    [[ "${label}" == "lvm" ]] && label="LVM"
+    part_id=$(get_part_from_diskpart "${dev}")
+    disk="$(get_disk_from_diskpart "${dev}")"
+
+    run_parted "${disk}" set "${part_id}" "${label}" on
+    logger "${NAME} ${func}: finished"
+    return 0
+}
+
+wait_for_file () {
+    local dev="$1"
+    local func="wait_for_file"
+    logger "${NAME} ${func}: started for ${dev}"
+    local count=3
+    local retry_wait=2
+    while [[ ! -e "${dev}" ]]; do
+        logger "${NAME} ${func}: ${dev} retry (${count})"
+        count=$((count - 1))
+        sleep ${retry_wait}
+        [[ ${count} -eq 0 ]] && error "${func}: Creation of file for ${dev} failed" && return 1
+    done
+    logger "${NAME} ${func}: ${dev} exists"
+    return 0
+}
+
+clear_part() {
+    local func="clear_part"
+    local dev="$1"
+    local part_num="$2"
+    logger "${NAME} ${func}: started for ${dev} part_num ${part_num}"
+
+    [[ ! -b "${dev}" ]] && error "${func}: Must specify a physical device clearing" && return 1
+
+    # Use sfdisk because it can wipe signatures, while parted does not do this
+    sfdisk --force --delete -w always "${dev}" "${part_num}"
+    logger "${NAME} ${func}: finished for ${dev} part_num ${part_num}"
+    #return ${rc}
+}
+
+clear_part_table() {
+    local func="clear_part_table"
+    local dev="$1"
+    echo "${dev}" | grep -q "^/dev/" || dev="/dev/${dev}"
+    logger "${NAME} ${func}: started for ${dev}"
+    [[ ! -b "${dev}" ]] && error "${func}: Must specify a physical device clearing" && return 1
+    local num_parts
+
+    num_parts=$(get_num_parts "${dev}")
+    while [[ ${num_parts} -gt 0 ]]; do
+        clear_part "${dev}" "${num_parts}" || return 1
+        num_parts=$((num_parts - 1))
+    done
+    
+    [[ $(get_num_parts "${dev}") -ne 0 ]] && error "${func}: Clearing partition table of ${dev} failed" && return 1
+
+    if [[ -d "/sys/firmware/efi" ]]; then
+        run_parted "${dev}" mklabel gpt
+        run_parted "${dev}" mkpart primary fat16 1MB 261MB
+        run_parted "${dev}" set 1 esp on
+        mkfs.fat "${dev}$(get_part_prefix "${dev}")1" > /dev/null
+        log-output -t ${NAME} apt-install dosfstools || true
+        log-output -t ${NAME} apt-install grub-efi || true
+    else
+        run_parted "${dev}" mklabel msdos
+        log-output -t ${NAME} apt-install grub-pc || true
+    fi
+
+    logger "${NAME} ${func}: finished for ${dev}"
+    return 0
+}
+
+
+part() {
+    local func="part"
+    local dev="$(echo "$1" | cut -f1 -d ' ')"
+    local size="$(echo "$1" | cut -f2 -d ' ')"
+    echo "${dev}" | grep -q "^/dev/" || dev="/dev/${dev}"
+    logger "${NAME} ${func}: started for ${dev}"
+    [[ ! -b "${dev}" ]] && error "${func}: Must specify a physical device for partitioning" && return 1
+    local free_id
+    local start
+    local end
+    local part_type
+
+    free_id="$(get_num_parts "${dev}")"
+    start=1MB
+    part_type="primary"
+    if [[ ${free_id} -ne 0 ]]; then
+        start="$(get_free_space "${dev}" | cut -d ' ' -f 2)"
+    fi
+    free_id=$((free_id + 1))
+
+    if [[ ! -d "/sys/firmware/efi" ]]; then
+        if [[ ${free_id} -eq 4 ]]; then
+            logger "${NAME} ${func}: extended partition"
+            end="$(get_free_space "${dev}" | cut -d ' ' -f 3)"
+            run_parted "${dev}" mkpart extended "${start}" "${end}"
+            part_dev="${dev}$(get_part_prefix "${dev}")${free_id}"
+            wait_for_file "${part_dev}" || return 1
+            free_id=$((free_id + 1))
+        elif [[ ${free_id} -gt 4 ]]; then
+            part_type="logical"
+        fi
+    fi
+
+    logger "${NAME} ${func}: ${dev} partno [${free_id}] size [${size}]"
+    if [[ "${size}" == "rest" ]]; then
+        end="$(get_free_space "${dev}" | cut -d ' ' -f 3)"
+    elif [[ "$(echo -n "${size}" | tail -c 1)" == "%" ]]; then
+        size="$(echo "${size}" | sed 's/.$//')"
+        free_space=$(get_free_space "${dev}" | cut -d ' ' -f 3 | sed '/MB//')
+        end="$((free_space * size / 100))MB"
+    else
+        end="$(( ($(human2longint "${start}") + $(human2longint "${size}")) / 1024 / 1024))MB"
+    fi
+    run_parted "${dev}" mkpart "${part_type}" ext4 "${start}" "${end}"
+    part_dev="${dev}$(get_part_prefix "${dev}")${free_id}"
+    wait_for_file "${part_dev}" || return 1
+    logger "${NAME} ${func}: finished for ${dev}"
+    return 0
+}
+
+md() {
+    local func="md"
+    local level="$(echo "$1" | cut -f1 -d ' ')"
+    local params="$(echo "$1" | cut -f2- -d ' ')"
+    logger "${NAME} ${func}: started"
+    local raid_id
+    local raid_dev
+    local mode
+    local num_raid_devs
+    local devs
+    local options
+    local valid_levels
+    local valid_modes
+    valid_levels="0 1 5 6 10"
+    valid_modes="raid options"
+
+    raid_id=$(mdadm --examine --scan | cut -d ' ' -f 2 | cut -d '/' -f 4 | sort -u | tail -1)
+    logger "${NAME} ${func}: scanned last used raidid: ${raid_id}"
+    [[ -z "${raid_id}" ]] && raid_id=0 || raid_id=$(( raid_id + 1 ))
+    logger "${NAME} ${func}: calculated first free raidid: ${raid_id}"
+
+    ! echo "${valid_levels}" | grep -wq "${level}" && error "${func}: level ${level} must be one of ${valid_levels}" && return 1
+    log-output -t ${NAME} modprobe "raid${level}"
+
+    for param in ${params}; do
+        if [[ -z "${mode}" ]] && ! echo "${valid_modes}" | grep -wq "${param}"; then
+            error "${func}: mode ${param} must be one of ${valid_modes}" && return 1
+        fi
+        if echo "${valid_modes}" | grep -wq "${param}"; then
+            mode="${param}"
+        elif echo "raid" | grep -wq "${mode}"; then
+            if [[ "${param}" == "missing" ]]; then
+                devs="${devs} ${param}"
+                continue
+            fi
+            param="$(get_dev_name "${param}")"
+            [[ ! -b "${param}" ]] && error "${func}: ${param} is not a block special device, refusing to add it to a raid array" && return 1
+            devs="${devs} ${param}"
+        else
+            options="${options} ${param}"
+        fi
+    done
+    [[ -z "${devs}" ]] && error "${func}: Must specify some physical devices for the raid device" && return 1
+
+    for part in ${devs}; do
+        if [[ "${part}" != "missing" ]]; then
+            change_part_label "${part}" raid || return 1
+        fi
+    done
+    num_raid_devs=$(echo "${devs}" | wc -w)
+    raid_dev="/dev/md/${raid_id}"
+    logger "${NAME} ${func}: mdadm --create --force --run --auto=yes --symlink=yes ${raid_dev} ${options} \
+                                --level=${level} --raid-devices=${num_raid_devs} ${devs}"
+    # shellcheck disable=SC2086
+    log-output -t ${NAME} mdadm --create --force --run --auto=yes --symlink=yes ${raid_dev} ${options} \
+                                --level=${level} --raid-devices=${num_raid_devs} ${devs} || return 1
+    wait_for_file "${raid_dev}" || return 1
+    log-output -t ${NAME} apt-install mdadm || true
+    # indicate that mdadm.conf must be created:
+    echo "${raid_id}" >> /tmp/mdadm
+    logger "${NAME} ${func}: finished"
+    return 0
+}
+
+crypt() {
+    local func="crypt"
+    logger "${NAME} ${func}: started"
+    local dev="$(echo "$1" | cut -f1 -d ' ')"
+    local name="$(echo "$1" | cut -f2 -d ' ')"
+    local type="$(echo "$1" | cut -f3 -d ' ')"
+    local pw="$(echo "$1" | cut -f4 -d ' ')"
+    local luks_boot="false"
+    dev="$(get_dev_name "${dev}")"
+    name="$(resolve_part_in_input "${name}")"
+    [[ ! -b "${dev}" ]] && error "${func}: ${dev} is not a block special device, refusing to encrypt it" && return 1
+    echo "${name}" | grep -q '[^0-9a-zA-Z_-]' && error "${func}: device name must be alpha-numeric. Not ${name}." && return 1
+    ! echo "luks1_boot luks1 luks2" | grep -wq "${type}" && error "${func}: type must be one of luks1_boot,luks1,luks2. Not ${type}." && return 1
+    [[ -z "${pw}" ]] && error "${func}: password for crypt device not specified, cannot continue" && return 1
+
+    if [[ "${type}" == "luks1_boot" ]]; then
+        type="luks1"
+        luks_boot=true
+    fi
+    # Use default cipher and key length
+    logger "${NAME} ${func}: cryptsetup -q luksFormat ${dev}"
+    echo "${pw}" | log-output -t ${NAME} cryptsetup -q luksFormat --type="${type}" "${dev}"
+    logger "${NAME} ${func}: cryptsetup open ${dev} ${name}"
+    echo "${pw}" | log-output -t ${NAME} cryptsetup open "${dev}" "${name}"
+
+    # https://cryptsetup-team.pages.debian.net/cryptsetup/encrypted-boot.html
+    if [[ "${luks_boot}" == "true" ]]; then
+        # For the crypto boot-partition only
+        # Create keyfile to unlock the root partition, it also serves as a trigger for further crypto boot-partition setup
+        log-output -t ${NAME} dd if=/dev/urandom of=/tmp/root_crypt.keyfile bs=512 count=1
+
+        # Reduce iterations the shorten boot-time
+        logger "${NAME} ${func}: cryptsetup luksChangeKey --pbkdf-force-iterations 500000 ${dev}"
+        echo "${pw}" | cryptsetup luksChangeKey --pbkdf-force-iterations 250000 "${dev}"
+
+        logger "${NAME} ${func}: cryptsetup luksAddKey "${dev}" /etc/luks/root_crypt.keyfile"
+        cat /tmp/root_crypt.keyfile | cryptsetup luksAddKey "${dev}"
+
+        # crypttab:
+        # 1st field   name of the encrypted blockdevice (/dev/mapper/<name>)
+        # 2nd field	  underlying block device
+        # 3rd field	  encryption password, if 'none' password must be entered during boot
+        # 4th field	  comma separated list of options
+        echo "${name} ${dev} none luks,discard" >> /tmp/crypttab
+        echo "${name} ${dev} /etc/luks/root_crypt.keyfile luks,discard,key-slot=1" >> /tmp/crypttab
+
+    elif [[ -f /tmp/root_crypt.keyfile ]]; then
+        # When crypto boot-partition exists, use the keyfile on the other encrypted partitions
+        logger "${NAME} ${func}: cryptsetup luksAddKey "${dev}" /etc/luks/root_crypt.keyfile"
+        cat /tmp/root_crypt.keyfile | cryptsetup luksAddKey "${dev}"
+
+        echo "${name} ${dev} none luks,discard" >> /tmp/crypttab
+        echo "${name} ${dev} /etc/luks/root_crypt.keyfile luks,discard,key-slot=1" >> /tmp/crypttab
+    else
+        # When crypto boot-partition does NOT exist, ask for pasword
+        echo "${name} ${dev} none luks,discard" >> /tmp/crypttab
+    fi
+
+    log-output -t ${NAME} apt-install cryptsetup || true
+    log-output -t ${NAME} apt-install cryptsetup-initramfs || true
+
+    logger "${NAME} ${func}: finshed"
+    return 0
+}
+
+vg() {
+    local func="vg"
+    local name="$(echo "$1" | cut -f1 -d ' ')"
+    logger "${NAME} ${func}: started for ${name}"
+    echo "${name}" | grep -q '[^0-9a-zA-Z_-]' && error "${func}: volume group name must be alpha-numeric. Not ${name}." && return 1
+    local devs
+    devs=""
+    for dev in $(echo "$1" | cut -f2- -d ' '); do
+        dev="$(get_dev_name "${dev}")"
+        [[ ! -b "${dev}" ]] && error "${func}: ${dev} is not a block special device, refusing to initialise as PV" && return 1
+
+        if is_physical_disk "${dev}"; then
+            change_part_label "${dev}" lvm || return 1
+        fi
+        logger "${NAME} ${func} pvcreate -y -ff --zero y ${dev}"
+        log-output -t ${NAME} pvcreate -y -ff --zero y "${dev}" 2>/dev/null
+        devs="${devs} ${dev}"
+    done
+
+    [[ -z "${devs}" ]] && error "${func}: Must specify some physical devices for the volume group" && return 1
+    logger "${NAME} ${func}: existing vgs [$(vgs --no-headings 2>/dev/null | sed 's/  */ /g' | cut -d ' ' -f 2 | tr '\n' ' ')]"
+    logger "${NAME} ${func} vgcreate -y -ff --zero y /dev/${name} ${devs}"
+    # shellcheck disable=SC2086
+    log-output -t ${NAME} vgcreate -y -ff --zero y "/dev/${name}" ${devs} 2>/dev/null
+    log-output -t ${NAME} vgchange -ay 2>/dev/null
+    # cannot check for devicefile bacause it does not exist
+    # alternative check:
+    vgs --noheadings 2>/dev/null | cut -d ' ' -f 3 | grep -q "/dev/${name}" && error "${func}: Create VG /dev/${name} failed" && return 1
+    log-output -t ${NAME} apt-install lvm2 || true
+
+    logger "${NAME} ${func}: finished for ${name}"
+    return 0
+}
+
+lv() {
+    local func="lv"
+    local vgname="$(echo "$1" | cut -f1 -d ' ')"
+    local lvname="$(echo "$1" | cut -f2 -d ' ')"
+    local size="$(echo "$1" | cut -f3 -d ' ')"
+    local pv="$(echo "$1" | cut -f4 -d ' ')"
+    local rc
+    local extents
+    local size_param
+    logger "${NAME} ${func}: started for ${lvname}"
+    echo "${vgname}" | grep -q "^/dev/" || vgname="/dev/${vgname}"
+
+    ! vgdisplay "${vgname}" 2>/dev/null | grep -q "UUID" && error "${func}: ${vgname} appears not to be a volume group." && return 1
+    echo "${lvname}" | grep -q '[^0-9a-zA-Z_-]' && error "${func}: logical volume name must be alpha-numeric. Not ${lvname}." && return 1
+
+    if [[ "$size" == "rest" ]]; then
+        extents="$(vgs --noheadings -o +vg_free_count 2>/dev/null | sed 's/  */ /g' | cut -d ' ' -f 9)"
+        size_param="-l${extents}"
+    elif [[ "$(echo -n "${size}" | tail -c 1)" == "%" ]]; then
+        size="$(echo "${size}" | sed 's/.$//')"
+        extents="$(vgs --noheadings -o +vg_extent_count 2>/dev/null | sed 's/  */ /g' | cut -d ' ' -f 9)"
+        extents=$((extents * size / 100))
+        size_param="-l${extents%.*}"
+    else
+        echo "${size}" | grep -qvE '^[0-9]+(\.[0-9]+)?([Tt]|[Gg]|[Mm]|[Kk]|)[Bb]?$' && error "${func}: ${size} is an invalid size (try a number followed by a size unit)." && return 1
+        size_param="-L${size}"
+    fi
+
+    if [[ -n "${pv}" ]]; then
+        pv="$(get_dev_name "${pv}")"
+        [[ ! -b "${pv}" ]] && error "${func}: ${pv} is not a block special device, cannot be used to host an LV" && return 1
+    fi
+
+    logger "${NAME} ${func}: existing lvs [$(lvs --no-headings 2>/dev/null | sed 's/  */ /g' | cut -d ' ' -f 2 | tr '\n' ' ')]"
+    logger "${NAME} ${func} lvcreate -y --zero y ${size_param} -n${lvname} ${vgname} ${pv}"
+    # shellcheck disable=SC2086
+    log-output -t ${NAME} lvcreate -y --zero y ${size_param} -n"${lvname}" "${vgname}" ${pv} 2>/dev/null
+    rc=$?
+    [[ ${rc} -ne 0 ]] && error "${func}: Create LV ${lvname} failed (${rc})" && return 1
+    wait_for_file "${vgname}/${lvname}" || return 1
+
+    logger "${NAME} ${func}: finished for ${lvname}"
+    return 0
+}
+
+fs() {
+    local func="fs"
+    local dev="$(echo "$1" | cut -f1 -d ' ')"
+    logger "${NAME} ${func}: started for ${dev}"
+    local fstype="$(echo "$1" | cut -f2 -d ' ')"
+    local fmtopts="$(echo "$1" | cut -f3- -d ' ')"
+    dev="$(get_dev_name "${dev}")"
+
+    [[ ! -b "${dev}" ]] && error "${func}: ${dev} is not a special block device, refusing to mkfs it" && return 1
+    local fstypes="ext2 ext3 ext4 xfs jfs"
+    local pkgs="e2fsprogs e2fsprogs e2fsprogs xfsprogs jfsutils"
+
+    ! echo "swap ${fstypes}" | grep -wq "${fstype}" && error "${func}: fstype ${fstype} must be one of ${fstypes}" && return 1
+
+    if [[ "swap" == "${fstype}" ]]; then
+        if is_physical_disk "${dev}"; then
+            change_part_label "${dev}" "swap" || return 1
+        fi
+        log-output -t ${NAME} mkswap "${dev}"
+    else
+        fmtopts=$(echo "${fmtopts}" | sed -e 's/\"//g')
+        logger "${NAME} ${func}: format command: mkfs.${fstype} ${fmtopts} ${dev}"
+        # shellcheck disable=SC2086
+        log-output -t ${NAME} "mkfs.${fstype}" ${fmtopts} "${dev}"
+        rc=$?
+        [[ ${rc} -ne 0 ]] && error "${func}: Formatting ${dev} failed (${rc})" && return 1
+        for fs in ${fstypes}; do
+            pkg=${pkgs%% *}
+            pkgs=${pkgs#* }
+            if [[ "${fs}" == "${fstype}" ]]; then
+                log-output -t ${NAME} apt-install "${pkg}" || true
+                continue
+            fi
+        done
+    fi
+
+    logger "${NAME} ${func}: finished for ${dev}"
+    return 0
+}
+
+fstab() {
+    local func="fstab"
+    local dev="$(echo "$1" | cut -f1 -d ' ')"
+    logger "${NAME} ${func}: started for ${dev}"
+    local fstype="$(echo "$1" | cut -f2 -d ' ')"
+    local mountpoint="$(echo "$1" | cut -f3 -d ' ')"
+    local mountopts="$(echo "$1" | cut -f4 -d ' ')"
+    local valid_fstypes="swap ext2 ext3 ext4 xfs jfs"
+    dev="$(get_dev_name "${dev}")"
+
+    ! echo "${valid_fstypes}" | grep -wq "${fstype}" && error "${func}: fstype ${fstype} must be one of ${valid_fstypes}" && return 1
+    [[ -z "${mountopts}" ]] && mountopts="defaults"
+
+    local fstab_dev="${dev}"
+    local dm_dev="/dev/mapper/$(echo "${dev}" | cut -d '/' -f 3- | tr '/' '-')"
+    if [[ ! -e  "${dm_dev}" ]]; then
+        fstab_dev="$(get_blkid "${fstab_dev}")"
+    fi
+
+    if [[ "${fstype}" == "swap" ]]; then
+        log-output -t ${NAME} swapon "${dev}" || return 1
+        logger "${NAME} ${func}: add swap to fstab"
+        echo "${fstab_dev} none swap sw 0 0" >> /tmp/fstab
+
+    elif [[ "${mountpoint}" == "/" ]]; then
+        echo "${mountopts}" | grep -wq "errors=remount-ro" || mountopts="${mountopts},errors=remount-ro"
+        log-output -t ${NAME} mkdir -p /target
+        log-output -t ${NAME} mount -t "${fstype}" "${dev}" /target || return 1
+        logger "${NAME} ${func}: add ${mountpoint} to fstab"
+        echo "${fstab_dev} ${mountpoint} ${fstype} ${mountopts} 0 1" >> /tmp/fstab
+    else
+        ! mount | grep " on /target " && error "${func}: Root fs must be mounted before this one: ${mountpoint}" && return 1
+        echo "${mountpoint}" | grep -q '^[^/]' && error "${func}: Mountpoint must start with a / (not: ${mountpoint})" && return 1
+        log-output -t ${NAME} mkdir -p "/target${mountpoint}"
+        log-output -t ${NAME} mount -t "${fstype}" "${dev}" "/target${mountpoint}" || return 1
+        logger "${NAME} ${func}: add ${mountpoint} to fstab"
+        echo "${fstab_dev} ${mountpoint} ${fstype} ${mountopts} 0 2" >> /tmp/fstab
+    fi
+    logger "${NAME} ${func}: finished for ${dev}"
+    return 0
+}
+
+in_target_config_files() {
+    local func="in_target_config_files"
+    logger "${NAME} ${func}: started"
+
+    log-output -t ${NAME} mkdir -p "/target/etc/"
+    cat >/target/etc/fstab <<EOF
+# /etc/fstab: static file system information.
+#
+# <file system> <mount point>   <type>  <options>       <dump>  <pass>
+proc            /proc           proc    defaults         0       0
+EOF
+    cat /tmp/fstab >>/target/etc/fstab
+    if [[ -d "/sys/firmware/efi" ]]; then
+        local boot_dev
+        local efi_part
+        local fstab_part
+        boot_dev="$(debconf-get grub-installer/bootdev)"
+        efi_part="${boot_dev}$(get_part_prefix "${boot_dev}")1"
+        fstab_part="$(get_blkid "${efi_part}")"
+        echo "${fstab_part} /boot/efi vfat umask=0077 0 1" >>/target/etc/fstab
+        log-output -t ${NAME} mkdir /target/boot/efi
+        log-output -t ${NAME} mount -t vfat -o umask=0077 "${efi_part}" /target/boot/efi
+    fi
+
+    if [[ -f "/tmp/mdadm" ]]; then
+        log-output -t ${NAME} mkdir -p /target/etc/mdadm
+        log-output -t ${NAME} cat >/target/etc/mdadm/mdadm.conf <<EOF
+# Autogenerated by custom-partitioner. See mdadm.conf(5) for more details on this file.
+DEVICE partitions
+EOF
+        log-output -t ${NAME} mdadm --detail --scan >>/target/etc/mdadm/mdadm.conf
+        log-output -t ${NAME} apt-install mdadm || true
+    fi
+
+    if [[ -f "/tmp/crypttab" ]]; then
+        log-output -t ${NAME} cp /tmp/crypttab /target/etc/crypttab
+        if [[ -f /tmp/root_crypt.keyfile ]]; then
+            log-output -t ${NAME} mkdir -p /target/etc/default/grub.d
+            echo "GRUB_ENABLE_CRYPTODISK=y" >>/target/etc/default/grub.d/luks_boot.cfg
+            log-output -t ${NAME} mkdir -p /target/etc/luks
+            log-output -t ${NAME} chmod u=rx,go-rwx /target/etc/luks
+            log-output -t ${NAME} cp /tmp/root_crypt.keyfile /target/etc/luks/root_crypt.keyfile
+            log-output -t ${NAME} chmod u=r,go-rwx /target/etc/luks/root_crypt.keyfile
+            log-output -t ${NAME} apt-install cryptsetup || true
+            log-output -t ${NAME} apt-install cryptsetup-initramfs || true
+        fi
+    fi
+    logger "${NAME} ${func}: finished"
+    return 0
+}
+
+make_partitions_config() {
+    local func="make_partitions_config"
+    logger "${NAME} ${func}: started"
+    local partitions_conf_file="$1"
+    local partitions_template_file="/tmp/partitions.tmpl"
+    local make_conf_script="/tmp/mk_partitions_conf.sh"
+
+    disks="$(get_disks)"
+    [[ ! -e "${make_conf_script}" ]] && return 1
+    [[ ! -e "${partitions_template_file}" ]] && return 1
+    logger "${NAME} ${make_conf_script} ${partitions_template_file} ${partitions_conf_file} \"${disks}\""
+    # shellcheck disable=SC2086
+    log-output -t ${NAME} sh ${make_conf_script} ${partitions_template_file} ${partitions_conf_file} "${disks}"
+    logger "${NAME} ${func}: finished"
+    return $?
+}
+
+process_partitions_config() {
+    local func="process_partitions_config"
+    logger "${NAME} ${func} start"
+    local partitions_conf_file="$1"
+    local partitions_prep_file="/tmp/partitions.prep"
+
+    [[ -f "${partitions_prep_file}" ]] && rm "${partitions_prep_file}"
+    touch "${partitions_prep_file}"
+    while read -r line; do
+        echo "${line}" | grep -q "^[ ]*#" && continue
+        echo "${line}" | grep -q "^[ ]*$" && continue
+        echo "${line}" >> "${partitions_prep_file}"
+    done < "${partitions_conf_file}"
+
+    # process the commands in the input in this order:
+    local ordered_commands="clear_part_table part md crypt vg lv fs fstab"
+    for process_command in ${ordered_commands}; do
+        while read -r command params; do
+            if [[ "${process_command}" == "${command}" ]]; then
+                params="$(echo "${params}" | sed 's/\s\s*/ /g')"
+                logger "${NAME} command:[${command}] params:[${params}]"
+                # shellcheck disable=SC2086
+                ! ${command} "${params}" && logger "Error: ${command} failed" && return 1
+            fi
+        done < "${partitions_prep_file}"
+    done
+
+    logger "${NAME} ${func} finished"
+    return 0
+}
+
+stop_constituent_devices() {
+    local func="stop_constituent_devices"
+    logger "${NAME} ${func} start"
+    swapoff -a
+
+    while mount | grep "/target"; do
+        for mountpoint in $(mount | grep "/target" | cut -d ' ' -f 3); do
+            # shellcheck disable=SC2086
+            umount ${mountpoint} || true
+        done
+    done
+
+    vgscan >/dev/null 2>&1
+    vgchange -ay 2>/dev/null || true
+    logger "${NAME} ${func}: existing vgs [$(vgs --no-headings 2>/dev/null | sed 's/  */ /g' | cut -d ' ' -f 2 | tr '\n' ' ')]"
+    logger "${NAME} ${func}: existing lvs [$(lvs --no-headings 2>/dev/null | sed 's/  */ /g' | cut -d ' ' -f 2 | tr '\n' ' ')]"
+    local lvs
+    lvs="$(lvscan -a 2>/dev/null| sed 's/  */ /g' | cut -d ' ' -f 3 | tr -d "'")"
+    logger "${NAME} ${func}: must remove LVs [${lvs}]"
+    # shellcheck disable=SC2010
+    for dev in ${lvs}; do
+        lvchange -an "${dev}" 2>/dev/null
+        lvremove -ff -y "${dev}" 2>/dev/null
+    done
+
+    for dev in $(vgs --noheadings 2>/dev/null | cut -d ' ' -f 3); do
+        vgchange -an 2>/dev/null
+        vgremove -ff -y "${dev}" 2>/dev/null
+    done
+
+    for dev in $(pvs --noheadings 2>/dev/null | cut -d ' ' -f 3); do
+        pvremove -ff -y "${dev}" 2>/dev/null
+        dd if=/dev/zero of="${dev}" bs=512 count=255
+    done
+    rm /etc/lvm/archive/* 2>/dev/null || true
+    rm /etc/lvm/backup/* 2>/dev/null || true
+
+    devs="$(dmsetup ls --target crypt | cut -f 1)"
+    if [[ "${devs}" != "No devices found" ]]; then
+        logger "${NAME} ${func}: must remove crypt devices [${devs}]"
+        for dev in ${devs}; do
+            part="$(cryptsetup status "${dev}" | grep "device:" | sed 's/  */ /g' | cut -d ' ' -f 3)"
+            cryptsetup close "${dev}"
+            dd if=/dev/zero of="${part}" bs=512 count=40960
+        done
+    fi
+
+    for dev in /dev/md[0-9]*; do
+        [[ ! -e "${dev}" ]] && continue
+        parts="$(mdadm -vQD "${dev}" | grep -o "/dev/.*" | grep -v "${dev}")"
+        mdadm --stop "${dev}"
+        logger "${NAME} ${func}: must raid zero superblock from [${parts}]"
+        for part in ${parts}; do
+            # shellcheck disable=SC2086
+            mdadm --zero-superblock ${part} 2>/dev/null
+        done
+    done
+    [[ -f /tmp/mdadm ]] && rm /tmp/mdadm
+
+    logger "${NAME} ${func} finished"
+    return 0
+}
+
+install_requirements() {
+    local func="install_requirements"
+    logger "${NAME} ${func} start"
+    local pkgs
+    hw-detect
+    pkgs="partman-lvm partman-crypto partman-crypto-dm parted-udeb fdisk-udeb"
+    for pkg in ${pkgs}; do
+        anna-install "${pkg}"
+    done
+    depmod -a
+    modprobe dm-mod
+    modprobe dm-crypt
+    logger "${NAME} ${func} finished"
+    return 0
+}
+
+main() {
+    logger "${NAME} started"
+    local partitions_conf_file="/tmp/partitions.conf"
+
+    install_requirements
+    stop_constituent_devices
+    make_partitions_config "${partitions_conf_file}"
+    rc=$?
+    [[ ${rc} -eq 0 ]] && process_partitions_config "${partitions_conf_file}"
+    rc=$?
+    [[ ${rc} -eq 0 ]] && in_target_config_files
+
+    # Deactivate partman
+    # Comment to allow partman to run (usefull for debugging)
+    [[ -f "/var/lib/dpkg/info/partman-base.postinst" ]] && sed -i -e 's/partman/#partman/' /var/lib/dpkg/info/partman-base.postinst
+
+    logger "${NAME} finished"
+    return ${rc}
+}
+
+main
+exit $?

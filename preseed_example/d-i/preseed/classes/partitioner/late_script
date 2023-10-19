@@ -1,0 +1,34 @@
+#!/bin/sh
+set -e
+. /usr/share/debconf/confmodule
+. /tmp/HandsOff-fn.sh
+echo 'debug: Running...'
+db_register hands-off/meta/text hands-off/title
+db_register hands-off/meta/text hands-off/item
+db_subst hands-off/title DESC "Partitioner"
+
+db_progress START 0 1 hands-off/title
+db_subst hands-off/item DESC "Configuring Grub"
+db_progress INFO hands-off/item
+
+# Remove GRUB_CMDLINE_LINUX="partition=1hd-lvm DEBCONF_DEBUG=5", add config for classic netif names
+sed -i -e "s/GRUB_TIMEOUT=5/GRUB_TIMEOUT=2/" /target/etc/default/grub
+
+# Support for luks whole disk encryption (trigger is set by custom-partitioner)
+if [[ -f /tmp/root_crypt.keyfile ]]; then
+    # https://help.ubuntu.com/community/Full_Disk_Encryption_Howto_2019#Enable_Encrypted_GRUB
+    # https://cryptsetup-team.pages.debian.net/cryptsetup/encrypted-boot.html
+    echo 'KEYFILE_PATTERN=/etc/luks/*.keyfile' >> /target/etc/cryptsetup-initramfs/conf-hook
+    echo 'UMASK=0077' >> /target/etc/initramfs-tools/initramfs.conf
+fi
+if [[ -d "/sys/firmware/efi" ]]; then
+    in-target grub-install
+fi
+in-target update-initramfs -u -k all
+in-target update-grub
+
+db_progress STOP
+db_unregister hands-off/item
+db_unregister hands-off/title
+echo 'debug: exiting successfully'
+exit 0

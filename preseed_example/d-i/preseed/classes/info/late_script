@@ -1,0 +1,25 @@
+#!/bin/sh
+set -e
+. /usr/share/debconf/confmodule
+. /tmp/HandsOff-fn.sh
+echo 'debug: Running...'
+
+db_register hands-off/meta/text hands-off/title
+db_register hands-off/meta/text hands-off/item
+db_subst hands-off/title DESC "System"
+db_progress START 0 1 hands-off/title
+db_progress STEP 1
+db_subst hands-off/item DESC "Downloading configuration info"
+db_progress INFO hands-off/item
+
+# shellcheck disable=SC2154
+INFO_URL="$(dirname "$(dirname "${url}")")"
+
+wget -O /tmp/domain_info "${INFO_URL}/domain_info"
+wget -O /tmp/host_info "${INFO_URL}/hosts/$(cat /etc/hostname)"
+
+db_progress STOP
+db_unregister hands-off/item
+db_unregister hands-off/title
+echo 'debug: exiting successfully'
+exit 0

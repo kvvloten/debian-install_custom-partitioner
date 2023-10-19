@@ -1,0 +1,27 @@
+#
+# mk_partitions_conf.sh prepends clear and create partitions commands,
+#   because the raid partitions are dynamically put together
+#
+# lvm
+# vg <vgname> <phy devs...>
+vg @{VG_NAME} md1
+
+# lvm
+# lv <vgname> <lvname> <size>
+lv @{VG_NAME} root_lv  @{ROOT_LV_SIZE}
+lv @{VG_NAME} swap_lv  @{SWAP_SIZE}
+
+# filesystems 
+# fs <part> <fstype> <mountpoint> <mountopts> 
+#   root fs must be the first in the list!
+#   specify lvm devices as /dev/mapper/<vg>-<lv>
+fs @{VG_NAME}/root_lv  ext4
+fs @{VG_NAME}/swap_lv  swap
+fs md0                 ext4
+
+# mounts
+# fstab <part> <fstype> <mountpoint> <mountopts> 
+#   root fs must be the first in the list!
+fstab @{VG_NAME}/root_lv  ext4  /       discard,noatime,nodiratime
+fstab @{VG_NAME}/swap_lv  swap  swap
+fstab md0                 ext4  /boot   discard,noatime,nodiratime,nodev,nosuid,noexec

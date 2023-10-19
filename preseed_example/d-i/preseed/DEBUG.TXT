@@ -1,0 +1,55 @@
+Debugging flags:
+
+If you'd like to enable the -x flag in the top level scripts (or your own 
+scripts if you use the same technique) you can either do it globally, by 
+adding
+
+	dbg/flags=all-x
+
+or selectively with
+
+	dbg/flags=early-x;late-x
+
+Similarly, you can make the installation pause a various points with either
+
+	dbg/pauses=all
+
+or (for example)
+
+	dbg/pauses=late;myclass
+
+assuming that you included a pause that checks for the myclass flag in your 
+script(s) somewhere. This can be very handy to allow the chance to look at 
+the state of the install by flipping to the shell on F2/F3. In addition to 
+explicitly defined flags in your scripts, you can also pause just before a 
+class's early or late script by using the name of the class, with /late or 
+/early appended, so if you wanted to pause just before .../classes/hands.com/
+general-tweaks/late_script runs, you should add
+
+	dbg/pauses=hands.com/general-tweaks/late
+
+To see how this works, look in the scripts for references to checkflag:
+
+	checkflag dbg/flags all-x early-x && set -x
+
+and:
+
+	checkflag dbg/pauses all late && pause "Top Level Late Script"
+
+these two examples are taken from the top level early and late scripts 
+respectively.
+
+The checkflag function checks the named flag (so you can use it for your 
+own purposes too) and if any of the semicolon (;) separated flags you've 
+set match the ones passed to checkflag on the command line, then it returns 
+true.
+
+DEBCONF_DEBUG=5
+
+If you're debugging a new preseed setup, I suggest that you set this on the 
+kernel command line -- it causes the messages that end up in syslog (and so 
+on the ALT-F4 screen) to be verbose enough that you can generally tell which 
+preseed values you have forgotten when a question pops up. When you're 
+presented with a question, flip to the F4 screen, and the last debconf 
+variable mentioned is probably the one you need to set in order to not see 
+that question again. 

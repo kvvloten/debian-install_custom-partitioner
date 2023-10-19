@@ -1,0 +1,25 @@
+#!/bin/sh
+set -e
+. /usr/share/debconf/confmodule
+. /tmp/HandsOff-fn.sh
+echo 'debug: Running...'
+db_register hands-off/meta/text hands-off/title
+db_register hands-off/meta/text hands-off/item
+db_subst hands-off/title DESC "Distribution"
+db_progress START 0 1 hands-off/title
+
+db_subst hands-off/item DESC "Setup Debian repostitories"
+db_progress INFO hands-off/item
+SUITE=$(sed 's/ /\n/g' /proc/cmdline | grep '^suite=' | cut -d '=' -f 2)
+
+cat >> /target/etc/apt/sources.list-inet << EOF
+deb http://ftp.nl.debian.org/debian $SUITE main non-free contrib
+deb http://ftp.nl.debian.org/debian $SUITE-updates main non-free contrib
+deb http://security.debian.org/debian-security $SUITE/updates main non-free contrib
+EOF
+
+db_progress STOP
+db_unregister hands-off/item
+db_unregister hands-off/title
+echo 'debug: exiting successfully'
+exit 0

@@ -1,0 +1,82 @@
+#!ipxe
+
+:start
+menu Boot menu
+item localboot   Boot from first harddisk
+item --gap --
+item debian_bookworm   Install debian bookworm
+item debian_bullseye   Install debian bullseye
+item --gap --
+item hostinfo   Details about this computer
+item shell      Drop to iPXE shell
+item reboot     Reboot computer
+choose target && goto ${target}
+
+:localboot
+exit
+
+:failed
+echo Booting failed, dropping to shell
+goto shell
+
+:shell
+echo Type 'exit' to get the back to the menu
+shell
+set menu-timeout 0
+set submenu-timeout 0
+goto start
+
+:hostinfo
+cpuid --ext 29 && set arch amd64 || set arch i386
+
+echo This computer : ||
+echo MAC address....${net0/mac} ||
+echo IP address.....${ip} ||
+echo Netmask........${netmask} ||
+echo Hostname.......${hostname} ||
+echo DNS-domain.....${domain} ||
+echo Architecture...${arch} ||
+echo Serial.........${serial} ||
+echo Asset number...${asset} ||
+echo Manufacturer...${manufacturer} ||
+echo Product........${product} ||
+echo BIOS platform..${platform} ||
+echo Memory-size....${memsize} ||
+echo TFTP-server....${next-server} ||
+echo ||
+echo press any key to return to Menu ||
+prompt
+goto start
+
+:reboot
+reboot
+
+:debian_bullseye
+set uri_prefix http://${next-server}/deploy/d-i/distro/debian-bullseye
+set preseed_url http://${next-server}/deploy/d-i/preseed
+initrd ${uri_prefix}/initrd.gz
+kernel ${uri_prefix}/linux
+# Kernel error:
+#   DRHD handling fault status reg 3
+# See: https://bbs.archlinux.org/viewtopic.php?id=230362
+# Add parameter: intel_iommu=off
+imgargs linux initrd=initrd.gz intel_iommu=off suite=bullseye keymap=us country=NL locale=en_US language=en classes=distro/debian url=${preseed_url}/preseed.cfg DEBCONF_DEBUG=5 interface=auto auto netcfg/link_wait_timeout=6 priority=critical
+boot ||
+echo press any key to return to Menu ||
+prompt
+goto start
+
+:debian_bookworm
+set uri_prefix http://${next-server}/deploy/d-i/distro/debian-bookworm
+set preseed_url http://${next-server}/deploy/d-i/preseed
+initrd ${uri_prefix}/initrd.gz
+kernel ${uri_prefix}/linux
+# Kernel error:
+#   DRHD handling fault status reg 3
+# See: https://bbs.archlinux.org/viewtopic.php?id=230362
+# Add parameter: intel_iommu=off
+imgargs linux initrd=initrd.gz intel_iommu=off suite=bookworm keymap=us country=NL locale=en_US language=en classes=distro/debian url=${preseed_url}/preseed.cfg DEBCONF_DEBUG=5 interface=auto auto netcfg/link_wait_timeout=6 priority=critical
+boot ||
+echo press any key to return to Menu ||
+prompt
+goto start

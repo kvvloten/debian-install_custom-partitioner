@@ -1,0 +1,63 @@
+#!/bin/sh
+set -e
+. /usr/share/debconf/confmodule
+. /tmp/HandsOff-fn.sh
+echo 'debug: Running...'
+db_register hands-off/meta/text hands-off/title
+db_register hands-off/meta/text hands-off/item
+db_subst hands-off/title DESC "Partitioner"
+db_progress START 0 2 hands-off/title
+db_subst hands-off/item DESC "Downloading custom partitioner package"
+db_progress INFO hands-off/item
+
+# Load variables
+. /tmp/domain_info
+. /tmp/host_info
+# Requires: PARTITION_LAYOUT
+
+# shellcheck disable=SC2154
+CUSTOM_PARTITIONER_URL="$(dirname "$(dirname "${url}")")/custom-partitioner"
+
+echo "Partition layout: ${PARTITION_LAYOUT}"
+# shellcheck disable=SC2154
+PARTITION_URL="$(dirname "$(dirname "${url}")")/partition-layouts"
+# shellcheck disable=SC2154
+PARTITION_URL_DEFAULT="$(dirname "${url}")/classes/$(echo "$0" | sed -r 's/\/tmp\/[a-z]+_script-//; s/_/\//g')/"
+
+CUSTOM_PARTITIONER="custom-partitioner"
+TEMPLATE_FILE="partitions.tmpl"
+MAKE_SCRIPT="mk_partitions_conf.sh"
+GET_PW_SCRIPT="get_luks_pw.sh"
+
+wget -O /tmp/${CUSTOM_PARTITIONER}.version "${CUSTOM_PARTITIONER_URL}/${CUSTOM_PARTITIONER}.version"
+UDEB_VERSION="$(cat /tmp/${CUSTOM_PARTITIONER}.version)"
+wget -O /tmp/${CUSTOM_PARTITIONER}.udeb "${CUSTOM_PARTITIONER_URL}/${CUSTOM_PARTITIONER}_${UDEB_VERSION}_all.udeb"
+udpkg --unpack /tmp/${CUSTOM_PARTITIONER}.udeb
+
+db_progress STEP 1
+db_subst hands-off/item DESC "Downloading partition definitions"
+db_progress INFO hands-off/item
+wget -O /tmp/${TEMPLATE_FILE} "${PARTITION_URL}/${PARTITION_LAYOUT}/${TEMPLATE_FILE}" || \
+    wget -O /tmp/${TEMPLATE_FILE} "${PARTITION_URL_DEFAULT}/${PARTITION_LAYOUT}/${TEMPLATE_FILE}"
+
+wget -O /tmp/${MAKE_SCRIPT} "${PARTITION_URL}/${PARTITION_LAYOUT}/${MAKE_SCRIPT}" || \
+    wget -O /tmp/${MAKE_SCRIPT} "${PARTITION_URL_DEFAULT}/${PARTITION_LAYOUT}/${MAKE_SCRIPT}"
+
+wget -O /tmp/${GET_PW_SCRIPT} "${PARTITION_URL}/${PARTITION_LAYOUT}/${GET_PW_SCRIPT}" || \
+    wget -O /tmp/${GET_PW_SCRIPT} "${PARTITION_URL_DEFAULT}/${PARTITION_LAYOUT}/${GET_PW_SCRIPT}" || true
+[[ -s /tmp/${GET_PW_SCRIPT} ]] || rm /tmp/${GET_PW_SCRIPT}
+
+if [[ ! -s /tmp/${TEMPLATE_FILE} ]]; then
+    echo "Error: file not found '$PARTITION_URL/${PARTITION_LAYOUT}/${TEMPLATE_FILE}'"
+    exit 1
+fi
+if [[ ! -s /tmp/${MAKE_SCRIPT} ]]; then
+    echo "Error: file not found '$PARTITION_URL/${PARTITION_LAYOUT}/${MAKE_SCRIPT}'"
+    exit 1
+fi
+
+db_progress STOP
+db_unregister hands-off/item
+db_unregister hands-off/title
+echo 'debug: exiting successfully'
+exit 0

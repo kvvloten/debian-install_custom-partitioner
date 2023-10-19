@@ -1,0 +1,43 @@
+# new partition table
+# clear_part_table <dev>
+clear_part_table @{DISK}
+
+# partitions
+# part <dev> <size_mb>|<size_gb>|<size_percent>|rest
+# partitions are in numerical order, and cannot be skipped
+part @{DISK} 2000M
+part @{DISK} rest
+
+# encryption
+# crypt <name> <device> <password>
+#   use device format <dev>_crypt
+crypt @{DISK}{part#2} @{DISK}{part#2}_crypt luks2 @{LUKS_PASSWORD}
+
+# lvm
+# vg <vgname> <phy devs...>
+vg @{VG_NAME} @{DISK}{part#2}_crypt
+
+# lvm
+# lv <vgname> <lvname> <size_mb>|<size_gb>|<size_percent>|rest
+lv @{VG_NAME} root_lv       60G
+lv @{VG_NAME} swap_lv       @{SWAP_SIZE}
+lv @{VG_NAME} nfs_cache_lv  20G
+lv @{VG_NAME} home_lv       100G
+
+# filesystems 
+# fs <part> <fstype> <fmtopts>
+fs @{VG_NAME}/root_lv       ext4
+fs @{VG_NAME}/swap_lv       swap
+fs @{DISK}{part#1}          ext4
+fs @{VG_NAME}/nfs_cache_lv  ext4
+fs @{VG_NAME}/home_lv       ext4
+
+# mounts
+# fstab <part> <fstype> <mountpoint> <mountopts> 
+#   root fs must be the first in the list!
+#   mount option 'discard' cannot be used on luks crypt devices
+fstab @{VG_NAME}/root_lv       ext4  /                   noatime,nodiratime
+fstab @{VG_NAME}/swap_lv       swap  swap
+fstab @{DISK}{part#1}          ext4  /boot               noatime,nodiratime,nodev,nosuid,noexec
+fstab @{VG_NAME}/nfs_cache_lv  ext4  /var/cache/fscache  noatime,nodiratime,nodev,nosuid,noexec
+fstab @{VG_NAME}/home_lv       ext4  /home               noatime,nodiratime,nodev,nosuid
