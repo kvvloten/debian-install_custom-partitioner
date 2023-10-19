@@ -215,6 +215,7 @@ systemctl restart isc-dhcp-server
 
 - Install a webserver e.g. Apache, configure it for http on port 80.
 - Make a directory for the deploy code available via a webserver at `http://<HOST-FQDN>/deploy`.
+- Since the files `domain_info` and `hosts/*` contain sensitive information, make sure only authorized hosts can access the deploy webpages!  
 - Copy the directory structure in `preseed_example` in the webdirectory, the picture below provides some details per file or directory.
 
 ```
